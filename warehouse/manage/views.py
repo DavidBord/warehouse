@@ -31,11 +31,10 @@ from warehouse.accounts.models import Email, User
 from warehouse.accounts.views import logout
 from warehouse.email import (
     send_account_deletion_email,
-    send_added_as_collaborator_email,
-    send_collaborator_added_email,
     send_email_verification_email,
     send_password_change_email,
     send_primary_email_change_email,
+    send_project_role_verification_email,
 )
 from warehouse.manage.forms import (
     AddEmailForm,
@@ -404,15 +403,29 @@ def manage_projects(request):
         return project.created
 
     all_user_projects = user_projects(request)
+    not_approved_project_roles = (
+        request.db.query(Role)
+        .filter(Role.user_id == request.user.id, Role.invitation_status == "PENDING")
+        .with_entities(Role.project_id)
+        .all()
+    )
+    not_approved_project_ids = set(
+        [_role.project_id for _role in not_approved_project_roles]
+    )
+    approved_projects = list(
+        filter(
+            lambda _project: _project.id not in not_approved_project_ids,
+            request.user.projects,
+        )
+    )
     projects_owned = set(
         project.name for project in all_user_projects["projects_owned"]
     )
     projects_sole_owned = set(
         project.name for project in all_user_projects["projects_sole_owned"]
     )
-
     return {
-        "projects": sorted(request.user.projects, key=_key, reverse=True),
+        "projects": sorted(approved_projects, key=_key, reverse=True),
         "projects_owned": projects_owned,
         "projects_sole_owned": projects_sole_owned,
     }
@@ -641,51 +654,26 @@ def manage_project_roles(project, request, _form_class=CreateRoleForm):
                 queue="error",
             )
         else:
-            request.db.add(
-                Role(user=user, project=project, role_name=form.role_name.data)
-            )
-            request.db.add(
-                JournalEntry(
-                    name=project.name,
-                    action=f"add {role_name} {username}",
-                    submitted_by=request.user,
-                    submitted_from=request.remote_addr,
-                )
-            )
-
-            owner_roles = (
-                request.db.query(Role)
-                .join(Role.user)
-                .filter(Role.role_name == "Owner", Role.project == project)
-            )
-            owner_users = {owner.user for owner in owner_roles}
-
-            # Don't send to the owner that added the new role
-            owner_users.discard(request.user)
-
-            # Don't send owners email to new user if they are now an owner
-            owner_users.discard(user)
-
-            send_collaborator_added_email(
-                request,
-                owner_users,
+            role = Role(
                 user=user,
-                submitter=request.user,
-                project_name=project.name,
-                role=form.role_name.data,
+                project=project,
+                role_name=role_name,
+                invitation_status="PENDING",
             )
-
-            send_added_as_collaborator_email(
+            request.db.add(role)
+            request.db.flush()  # in order to get role id
+            # send_project_role_verification_email needs to get request and user as
+            # first args because of the @email_ decorator
+            res = send_project_role_verification_email(
                 request,
                 user,
-                submitter=request.user,
+                desired_role=role_name,
+                initiator_username=request.user.name,
                 project_name=project.name,
-                role=form.role_name.data,
+                role_id=role.id,
             )
-
-            request.session.flash(
-                f"Added collaborator '{form.username.data}'", queue="success"
-            )
+            print(res)
+            request.session.flash("Invitation sent", queue="success")
         form = _form_class(user_service=user_service)
 
     roles = request.db.query(Role).join(User).filter(Role.project == project).all()

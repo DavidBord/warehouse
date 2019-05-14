@@ -66,6 +66,7 @@ class Role(db.Model):
         ForeignKey("projects.id", onupdate="CASCADE", ondelete="CASCADE"),
         nullable=False,
     )
+    invitation_status = Column(Text)
 
     user = orm.relationship(User, lazy=False)
     project = orm.relationship("Project", lazy=False)
